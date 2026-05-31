@@ -1,0 +1,15 @@
+﻿.idea/
+*.DotSettings.user
+bin/
+obj/
+out/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+packages/
+*.nupkg
+.vs/
+appsettings.*.json
+wwwroot/lib/
+/FitnessHouseNewsBot/Storage/

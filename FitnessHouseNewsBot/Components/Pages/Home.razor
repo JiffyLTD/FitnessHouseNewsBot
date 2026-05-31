@@ -1,0 +1,204 @@
+﻿@page "/"
+@rendermode InteractiveServer
+@implements IDisposable
+
+@using System.Text.Json
+@using FitnessHouseNewsBot.Models
+@using FitnessHouseNewsBot.Services
+
+@inject ParserState State
+@inject FitnessParser Parser
+
+<PageTitle>FitnessHouse Bot</PageTitle>
+
+<h1>FitnessHouse Bot</h1>
+
+@if (_isLoading)
+{
+    <div class="d-flex align-items-center gap-3 mt-4">
+
+        <div class="spinner-border text-primary"
+             role="status">
+        </div>
+
+        <span>Загрузка данных...</span>
+
+    </div>
+}
+else
+{
+    <div class="card p-4 mt-4">
+
+        <p>
+            <b>Последний запуск:</b>
+
+            @(State.LastRun?.ToString(
+                "dd.MM.yyyy HH:mm:ss") ?? "-")
+        </p>
+
+        <p>
+            <b>Статус:</b>
+
+            @State.LastStatus
+        </p>
+
+        <p>
+            <b>В работе:</b>
+
+            @(State.IsRunning ? "Да" : "Нет")
+        </p>
+
+        <button class="btn btn-primary ms-2 mb-3"
+                @onclick="RunParser"
+                disabled="@State.IsRunning">
+
+            @if (State.IsRunning)
+            {
+                <span class="spinner-border spinner-border-sm me-2"></span>
+            }
+
+            Запустить сейчас
+
+        </button>
+        
+        <button class="btn btn-secondary ms-2"
+                @onclick="ResendLastMessages">
+
+            Отправить последние новости
+
+        </button>
+
+    </div>
+
+    <div class="card p-4 mt-4">
+
+        <h3>Последние отправленные новости</h3>
+
+        @if (_news.Count == 0)
+        {
+            <p>Нет данных</p>
+        }
+        else
+        {
+            <table class="table table-striped mt-3">
+
+                <thead>
+                <tr>
+                    <th>Дата</th>
+                    <th>Сообщение</th>
+                </tr>
+                </thead>
+
+                <tbody>
+
+                @foreach (var item in _news
+                             .OrderByDescending(x => x.SavedAt)
+                             .Take(20))
+                {
+                    <tr>
+                        <td>
+                            @item.SavedAt.ToString(
+                                "dd.MM.yyyy HH:mm:ss")
+                        </td>
+
+                        <td style="white-space: pre-wrap">
+                            @item.Message
+                        </td>
+                    </tr>
+                }
+
+                </tbody>
+
+            </table>
+        }
+
+    </div>
+}
+
+@code {
+    
+    private async Task ResendLastMessages()
+    {
+        if (_news.Count == 0)
+            return;
+
+        var latest = _news
+            .OrderByDescending(x => x.SavedAt)
+            .Take(5)
+            .ToList();
+
+        foreach (var item in latest)
+        {
+            await Parser.SendManualMessageAsync(item.Message);
+        }
+    }
+
+    private readonly string _storagePath =
+        Path.Combine("storage", "sent-news.json");
+
+    private List<SentNewsEntry> _news = [];
+
+    private bool _isLoading = true;
+
+    protected override async Task OnInitializedAsync()
+    {
+        State.OnChange += Refresh;
+
+        await LoadNewsAsync();
+
+        _isLoading = false;
+    }
+
+    private async Task RunParser()
+    {
+        _ = Task.Run(async () =>
+        {
+            await Parser.ParseAsync();
+
+            await LoadNewsAsync();
+
+            await InvokeAsync(StateHasChanged);
+        });
+    }
+
+    private async Task LoadNewsAsync()
+    {
+        try
+        {
+            if (!File.Exists(_storagePath))
+            {
+                _news = [];
+
+                return;
+            }
+
+            var json =
+                await File.ReadAllTextAsync(_storagePath);
+
+            _news =
+                JsonSerializer.Deserialize<List<SentNewsEntry>>(json)
+                ?? [];
+        }
+        catch
+        {
+            _news = [];
+        }
+    }
+
+    private void Refresh()
+    {
+        InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        State.OnChange -= Refresh;
+    }
+
+    private class SentNewsEntry
+    {
+        public string Message { get; set; } = string.Empty;
+
+        public DateTime SavedAt { get; set; }
+    }
+}
