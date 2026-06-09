@@ -1,0 +1,298 @@
+@page "/dashboard"
+@rendermode InteractiveServer
+@implements IDisposable
+
+@using System.Text.Json
+@using FitnessHouseNewsBot.Models
+@using FitnessHouseNewsBot.Services
+@using Microsoft.Extensions.Hosting
+@using Microsoft.JSInterop
+
+@inject ParserState State
+@inject FitnessParser Parser
+@inject IHostEnvironment Environment
+@inject IJSRuntime JsRuntime
+@inject NavigationManager NavigationManager
+
+<PageTitle>FitnessHouse Bot</PageTitle>
+
+<section class="@PageCssClass">
+    <div class="dashboard-shell">
+        <header class="hero-panel">
+            <div>
+                <p class="eyebrow">FitnessHouse monitor</p>
+
+                <h1>Новости клуба под контролем</h1>
+
+                <p class="hero-text">
+                    Парсер отслеживает важные изменения по клубу и отправляет
+                    подходящие уведомления в VK.
+                </p>
+            </div>
+
+            <button class="theme-toggle"
+                    type="button"
+                    @onclick="ToggleTheme"
+                    aria-label="Сменить тему">
+                <span>@ThemeIcon</span>
+                <span>@ThemeLabel</span>
+            </button>
+        </header>
+
+        @if (!_isAccessChecked)
+        {
+            <div class="status-card loading-card">
+                <div class="spinner-border"
+                     role="status">
+                </div>
+
+                <span>Проверка доступа...</span>
+            </div>
+        }
+        else if (_isLoading)
+        {
+            <div class="status-card loading-card">
+                <div class="spinner-border"
+                     role="status">
+                </div>
+
+                <span>Загрузка данных...</span>
+            </div>
+        }
+        else
+        {
+            <div class="status-grid">
+                <article class="status-card">
+                    <span class="metric-label">Последний запуск</span>
+                    <strong>
+                        @(State.LastRun?.ToString("dd.MM.yyyy HH:mm:ss") ?? "-")
+                    </strong>
+                </article>
+
+                <article class="status-card">
+                    <span class="metric-label">Статус</span>
+                    <strong>@State.LastStatus</strong>
+                </article>
+
+                <article class="status-card">
+                    <span class="metric-label">В работе</span>
+                    <strong>@(State.IsRunning ? "Да" : "Нет")</strong>
+                </article>
+            </div>
+
+            <section class="control-panel">
+                <div>
+                    <h2>Управление парсером</h2>
+                    <p>
+                        Ручной запуск использует ту же защиту от дублей, что и
+                        фоновый сервис.
+                    </p>
+                </div>
+
+                <div class="actions">
+                    <button class="action-button primary-action"
+                            @onclick="RunParser"
+                            disabled="@State.IsRunning">
+                        @if (State.IsRunning)
+                        {
+                            <span class="spinner-border spinner-border-sm"></span>
+                        }
+
+                        Запустить сейчас
+                    </button>
+
+                    <button class="action-button secondary-action"
+                            @onclick="ResendLastMessages"
+                            disabled="@(_news.Count == 0)">
+                        Отправить последние новости
+                    </button>
+                </div>
+            </section>
+
+            <section class="news-panel">
+                <div class="section-heading">
+                    <div>
+                        <p class="eyebrow">Журнал отправок</p>
+                        <h2>Последние отправленные новости</h2>
+                    </div>
+
+                    <span class="news-count">@_news.Count записей</span>
+                </div>
+
+                @if (_news.Count == 0)
+                {
+                    <p class="empty-state">Нет данных</p>
+                }
+                else
+                {
+                    <div class="table-shell">
+                        <table class="news-table">
+                            <thead>
+                            <tr>
+                                <th>Дата</th>
+                                <th>Сообщение</th>
+                            </tr>
+                            </thead>
+
+                            <tbody>
+
+                            @foreach (var item in _news
+                                         .OrderByDescending(x => x.SavedAt)
+                                         .Take(20))
+                            {
+                                <tr>
+                                    <td>
+                                        @item.SavedAt.ToString("dd.MM.yyyy HH:mm:ss")
+                                    </td>
+
+                                    <td>
+                                        @item.Message
+                                    </td>
+                                </tr>
+                            }
+
+                            </tbody>
+                        </table>
+                    </div>
+                }
+            </section>
+        }
+    </div>
+</section>
+
+@code {
+    private const string UiLockSessionKey = "fitness-house-news-bot-unlocked";
+    private const string ThemeStorageKey = "fitness-house-news-bot-theme";
+
+    private bool _isAccessChecked;
+    private bool _isDarkTheme;
+    private bool _isLoading = true;
+    private List<SentNewsEntry> _news = [];
+
+    private string PageCssClass =>
+        $"dashboard-page {(_isDarkTheme ? "theme-dark" : "theme-light")}";
+
+    private string ThemeIcon =>
+        _isDarkTheme ? "☀" : "☾";
+
+    private string ThemeLabel =>
+        _isDarkTheme ? "Светлая тема" : "Темная тема";
+
+    private string StoragePath =>
+        Path.Combine(
+            Environment.ContentRootPath,
+            "storage",
+            "sent-news.json");
+
+    protected override async Task OnInitializedAsync()
+    {
+        State.OnChange += Refresh;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+            return;
+
+        var isUnlocked = await JsRuntime.InvokeAsync<string?>(
+            "fitnessHouseSession.get",
+            UiLockSessionKey);
+
+        if (!string.Equals(
+                isUnlocked,
+                "true",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            NavigationManager.NavigateTo("/");
+
+            return;
+        }
+
+        var savedTheme = await JsRuntime.InvokeAsync<string?>(
+            "fitnessHouseTheme.get",
+            ThemeStorageKey);
+
+        if (!string.IsNullOrWhiteSpace(savedTheme))
+        {
+            _isDarkTheme = string.Equals(
+                savedTheme,
+                "dark",
+                StringComparison.OrdinalIgnoreCase);
+
+        }
+
+        await LoadNewsAsync();
+
+        _isAccessChecked = true;
+        _isLoading = false;
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task ToggleTheme()
+    {
+        _isDarkTheme = !_isDarkTheme;
+
+        await JsRuntime.InvokeVoidAsync(
+            "fitnessHouseTheme.set",
+            ThemeStorageKey,
+            _isDarkTheme ? "dark" : "light");
+    }
+
+    private async Task ResendLastMessages()
+    {
+        if (_news.Count == 0)
+            return;
+
+        var latest = _news
+            .OrderByDescending(x => x.SavedAt)
+            .Take(5)
+            .ToList();
+
+        foreach (var item in latest)
+        {
+            await Parser.SendManualMessageAsync(item.Message);
+        }
+    }
+
+    private async Task RunParser()
+    {
+        await Parser.ParseAsync();
+
+        await LoadNewsAsync();
+    }
+
+    private async Task LoadNewsAsync()
+    {
+        try
+        {
+            if (!File.Exists(StoragePath))
+            {
+                _news = [];
+
+                return;
+            }
+
+            var json =
+                await File.ReadAllTextAsync(StoragePath);
+
+            _news =
+                JsonSerializer.Deserialize<List<SentNewsEntry>>(json)
+                ?? [];
+        }
+        catch
+        {
+            _news = [];
+        }
+    }
+
+    private void Refresh()
+    {
+        InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        State.OnChange -= Refresh;
+    }
+}

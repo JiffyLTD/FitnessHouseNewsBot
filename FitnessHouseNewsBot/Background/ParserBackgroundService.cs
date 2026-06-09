@@ -36,7 +36,7 @@ public class ParserBackgroundService : BackgroundService
                 var parser = scope.ServiceProvider
                     .GetRequiredService<FitnessParser>();
 
-                await parser.ParseAsync();
+                await parser.ParseAsync(stoppingToken);
             }
             catch (Exception ex)
             {

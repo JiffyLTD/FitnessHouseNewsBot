@@ -1,4 +1,5 @@
-﻿using FitnessHouseNewsBot.Options;
+using System.Text.Json;
+using FitnessHouseNewsBot.Options;
 using Microsoft.Extensions.Options;
 
 namespace FitnessHouseNewsBot.Services;
@@ -19,7 +20,9 @@ public class VkService
         _options = options.Value;
     }
 
-    public async Task SendMessageAsync(string message)
+    public async Task SendMessageAsync(
+        string message,
+        CancellationToken cancellationToken = default)
     {
         var request = new Dictionary<string, string>
         {
@@ -34,15 +37,40 @@ public class VkService
 
         var response = await _httpClient.PostAsync(
             "https://api.vk.com/method/messages.send",
-            content);
+            content,
+            cancellationToken);
 
         var responseText =
-            await response.Content.ReadAsStringAsync();
+            await response.Content.ReadAsStringAsync(cancellationToken);
 
-        _logger.LogInformation(
+        _logger.LogDebug(
             "VK response: {Response}",
             responseText);
 
         response.EnsureSuccessStatusCode();
+
+        using var document = JsonDocument.Parse(responseText);
+
+        if (!document.RootElement.TryGetProperty(
+                "error",
+                out var error))
+        {
+            _logger.LogInformation(
+                "VK message accepted");
+
+            return;
+        }
+
+        var errorCode = error.TryGetProperty("error_code", out var code)
+            ? code.GetInt32()
+            : 0;
+
+        var errorMessage =
+            error.TryGetProperty("error_msg", out var messageElement)
+                ? messageElement.GetString()
+                : "Unknown VK API error";
+
+        throw new InvalidOperationException(
+            $"VK API error {errorCode}: {errorMessage}");
     }
 }

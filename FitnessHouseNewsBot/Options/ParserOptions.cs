@@ -4,6 +4,8 @@ namespace FitnessHouseNewsBot.Options;
 
 public class ParserOptions
 {
+    public const string SectionName = "Parser";
+
     [Required]
     [Url]
     public string Url { get; set; } = string.Empty;

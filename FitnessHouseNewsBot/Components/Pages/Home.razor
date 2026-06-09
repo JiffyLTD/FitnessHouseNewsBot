@@ -1,204 +1,94 @@
-﻿@page "/"
+@page "/"
 @rendermode InteractiveServer
-@implements IDisposable
 
-@using System.Text.Json
-@using FitnessHouseNewsBot.Models
 @using FitnessHouseNewsBot.Services
+@using Microsoft.JSInterop
 
-@inject ParserState State
-@inject FitnessParser Parser
+@inject UiLockService UiLockService
+@inject IJSRuntime JsRuntime
+@inject NavigationManager NavigationManager
 
-<PageTitle>FitnessHouse Bot</PageTitle>
+<PageTitle>Доступ к FitnessHouse Bot</PageTitle>
 
-<h1>FitnessHouse Bot</h1>
+<section class="lock-page">
+    <div class="lock-card">
+        <div class="lock-badge">Private UI</div>
 
-@if (_isLoading)
-{
-    <div class="d-flex align-items-center gap-3 mt-4">
-
-        <div class="spinner-border text-primary"
-             role="status">
-        </div>
-
-        <span>Загрузка данных...</span>
-
-    </div>
-}
-else
-{
-    <div class="card p-4 mt-4">
+        <h1>Введите пароль</h1>
 
         <p>
-            <b>Последний запуск:</b>
-
-            @(State.LastRun?.ToString(
-                "dd.MM.yyyy HH:mm:ss") ?? "-")
+            Панель управления парсером закрыта. Пароль хранится в конфигурации
+            приложения.
         </p>
 
-        <p>
-            <b>Статус:</b>
+        <form class="lock-form"
+              @onsubmit="UnlockAsync"
+              @onsubmit:preventDefault>
+            <label for="password">Пароль</label>
 
-            @State.LastStatus
-        </p>
+            <input id="password"
+                   type="password"
+                   autocomplete="current-password"
+                   autofocus
+                   @bind="_password"
+                   @bind:event="oninput" />
 
-        <p>
-            <b>В работе:</b>
-
-            @(State.IsRunning ? "Да" : "Нет")
-        </p>
-
-        <button class="btn btn-primary ms-2 mb-3"
-                @onclick="RunParser"
-                disabled="@State.IsRunning">
-
-            @if (State.IsRunning)
+            @if (!string.IsNullOrWhiteSpace(_errorMessage))
             {
-                <span class="spinner-border spinner-border-sm me-2"></span>
+                <span class="lock-error">@_errorMessage</span>
             }
 
-            Запустить сейчас
-
-        </button>
-        
-        <button class="btn btn-secondary ms-2"
-                @onclick="ResendLastMessages">
-
-            Отправить последние новости
-
-        </button>
-
+            <button type="submit"
+                    disabled="@_isSubmitting">
+                @(_isSubmitting ? "Проверяю..." : "Открыть панель")
+            </button>
+        </form>
     </div>
-
-    <div class="card p-4 mt-4">
-
-        <h3>Последние отправленные новости</h3>
-
-        @if (_news.Count == 0)
-        {
-            <p>Нет данных</p>
-        }
-        else
-        {
-            <table class="table table-striped mt-3">
-
-                <thead>
-                <tr>
-                    <th>Дата</th>
-                    <th>Сообщение</th>
-                </tr>
-                </thead>
-
-                <tbody>
-
-                @foreach (var item in _news
-                             .OrderByDescending(x => x.SavedAt)
-                             .Take(20))
-                {
-                    <tr>
-                        <td>
-                            @item.SavedAt.ToString(
-                                "dd.MM.yyyy HH:mm:ss")
-                        </td>
-
-                        <td style="white-space: pre-wrap">
-                            @item.Message
-                        </td>
-                    </tr>
-                }
-
-                </tbody>
-
-            </table>
-        }
-
-    </div>
-}
+</section>
 
 @code {
-    
-    private async Task ResendLastMessages()
+    private const string UiLockSessionKey = "fitness-house-news-bot-unlocked";
+
+    private string _password = string.Empty;
+    private string? _errorMessage;
+    private bool _isSubmitting;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        if (_news.Count == 0)
+        if (!firstRender)
             return;
 
-        var latest = _news
-            .OrderByDescending(x => x.SavedAt)
-            .Take(5)
-            .ToList();
+        var isUnlocked = await JsRuntime.InvokeAsync<string?>(
+            "fitnessHouseSession.get",
+            UiLockSessionKey);
 
-        foreach (var item in latest)
+        if (string.Equals(
+                isUnlocked,
+                "true",
+                StringComparison.OrdinalIgnoreCase))
         {
-            await Parser.SendManualMessageAsync(item.Message);
+            NavigationManager.NavigateTo("/dashboard");
         }
     }
 
-    private readonly string _storagePath =
-        Path.Combine("storage", "sent-news.json");
-
-    private List<SentNewsEntry> _news = [];
-
-    private bool _isLoading = true;
-
-    protected override async Task OnInitializedAsync()
+    private async Task UnlockAsync()
     {
-        State.OnChange += Refresh;
+        _isSubmitting = true;
+        _errorMessage = null;
 
-        await LoadNewsAsync();
-
-        _isLoading = false;
-    }
-
-    private async Task RunParser()
-    {
-        _ = Task.Run(async () =>
+        if (!UiLockService.VerifyPassword(_password))
         {
-            await Parser.ParseAsync();
+            _errorMessage = "Неверный пароль";
+            _isSubmitting = false;
 
-            await LoadNewsAsync();
-
-            await InvokeAsync(StateHasChanged);
-        });
-    }
-
-    private async Task LoadNewsAsync()
-    {
-        try
-        {
-            if (!File.Exists(_storagePath))
-            {
-                _news = [];
-
-                return;
-            }
-
-            var json =
-                await File.ReadAllTextAsync(_storagePath);
-
-            _news =
-                JsonSerializer.Deserialize<List<SentNewsEntry>>(json)
-                ?? [];
+            return;
         }
-        catch
-        {
-            _news = [];
-        }
-    }
 
-    private void Refresh()
-    {
-        InvokeAsync(StateHasChanged);
-    }
+        await JsRuntime.InvokeVoidAsync(
+            "fitnessHouseSession.set",
+            UiLockSessionKey,
+            "true");
 
-    public void Dispose()
-    {
-        State.OnChange -= Refresh;
-    }
-
-    private class SentNewsEntry
-    {
-        public string Message { get; set; } = string.Empty;
-
-        public DateTime SavedAt { get; set; }
+        NavigationManager.NavigateTo("/dashboard");
     }
 }

@@ -13,6 +13,9 @@
     <link href="app.css"
           rel="stylesheet" />
 
+    <link href="FitnessHouseNewsBot.styles.css"
+          rel="stylesheet" />
+
     <HeadOutlet />
 
 </head>
@@ -22,6 +25,28 @@
 <Routes />
 
 <script src="_framework/blazor.web.js"></script>
+<script>
+    window.fitnessHouseTheme = {
+        get: function (key) {
+            return window.localStorage.getItem(key);
+        },
+        set: function (key, value) {
+            window.localStorage.setItem(key, value);
+        }
+    };
+
+    window.fitnessHouseSession = {
+        get: function (key) {
+            return window.sessionStorage.getItem(key);
+        },
+        set: function (key, value) {
+            window.sessionStorage.setItem(key, value);
+        },
+        remove: function (key) {
+            window.sessionStorage.removeItem(key);
+        }
+    };
+</script>
 </body>
 
 </html>

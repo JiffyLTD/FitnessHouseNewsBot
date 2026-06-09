@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using FitnessHouseNewsBot.Models;
 using FitnessHouseNewsBot.Options;
 using HtmlAgilityPack;
@@ -13,17 +13,19 @@ public class FitnessParser
     private readonly ParserState _state;
     private readonly ILogger<FitnessParser> _logger;
     private readonly ParserOptions _options;
+    private readonly IReadOnlyList<string> _clubKeywords;
+    private readonly IReadOnlyList<string> _alertKeywords;
+    private readonly SemaphoreSlim _parseLock = new(1, 1);
 
-    private readonly HashSet<string> _sentMessages;
-
-    private readonly string _storagePath =
-        Path.Combine("storage", "sent-news.json");
+    private readonly Dictionary<string, SentNewsEntry> _sentMessages;
+    private readonly string _storagePath;
 
     public FitnessParser(
         IHttpClientFactory httpFactory,
         VkService vkService,
         ParserState state,
         IOptions<ParserOptions> options,
+        IHostEnvironment environment,
         ILogger<FitnessParser> logger)
     {
         _httpFactory = httpFactory;
@@ -31,8 +33,15 @@ public class FitnessParser
         _state = state;
         _logger = logger;
         _options = options.Value;
+        _clubKeywords = NormalizeKeywords(_options.ClubKeywords);
+        _alertKeywords = NormalizeKeywords(_options.AlertKeywords);
+        _storagePath = Path.Combine(
+            environment.ContentRootPath,
+            "storage",
+            "sent-news.json");
 
-        Directory.CreateDirectory("storage");
+        Directory.CreateDirectory(
+            Path.GetDirectoryName(_storagePath)!);
 
         _logger.LogInformation(
             "Initializing FitnessParser");
@@ -44,9 +53,10 @@ public class FitnessParser
             _sentMessages.Count);
     }
 
-    public async Task ParseAsync()
+    public async Task ParseAsync(
+        CancellationToken cancellationToken = default)
     {
-        if (_state.IsRunning)
+        if (!_parseLock.Wait(0))
         {
             _logger.LogWarning(
                 "Parser already running");
@@ -65,13 +75,17 @@ public class FitnessParser
                 startedAt);
 
             var client = _httpFactory.CreateClient();
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(
+                "FitnessHouseNewsBot/1.0");
 
             _logger.LogInformation(
                 "Requesting page: {Url}",
                 _options.Url);
 
             var html =
-                await client.GetStringAsync(_options.Url);
+                await client.GetStringAsync(
+                    _options.Url,
+                    cancellationToken);
 
             _logger.LogInformation(
                 "HTML loaded successfully. Length: {Length}",
@@ -88,6 +102,9 @@ public class FitnessParser
             {
                 _logger.LogWarning(
                     "No articles found");
+
+                _state.LastRun = DateTime.Now;
+                _state.LastStatus = "Новости не найдены";
 
                 return;
             }
@@ -118,7 +135,7 @@ public class FitnessParser
                     clubNode.InnerText.Trim());
 
                 var clubMatched =
-                    _options.ClubKeywords.Any(keyword =>
+                    _clubKeywords.Any(keyword =>
                         club.Contains(
                             keyword,
                             StringComparison.OrdinalIgnoreCase));
@@ -136,7 +153,7 @@ public class FitnessParser
                     textNode.InnerText.Trim());
 
                 var alertMatched =
-                    _options.AlertKeywords.Any(keyword =>
+                    _alertKeywords.Any(keyword =>
                         text.Contains(
                             keyword,
                             StringComparison.OrdinalIgnoreCase));
@@ -157,7 +174,7 @@ public class FitnessParser
                 var message =
                     $"🏋️ {club}\n\n{text}";
 
-                if (_sentMessages.Contains(message))
+                if (_sentMessages.ContainsKey(message))
                 {
                     _logger.LogInformation(
                         "Duplicate skipped: {Club}",
@@ -170,15 +187,21 @@ public class FitnessParser
                     "Sending VK message for {Club}",
                     club);
 
-                await _vkService.SendMessageAsync(message);
+                await _vkService.SendMessageAsync(
+                    message,
+                    cancellationToken);
 
                 _logger.LogInformation(
                     "VK message successfully sent for {Club}",
                     club);
 
-                _sentMessages.Add(message);
+                _sentMessages[message] = new SentNewsEntry
+                {
+                    Message = message,
+                    SavedAt = DateTime.Now
+                };
 
-                await SaveSentMessagesAsync(message);
+                await SaveSentMessagesAsync(cancellationToken);
 
                 _logger.LogInformation(
                     "Message saved to local storage");
@@ -193,6 +216,14 @@ public class FitnessParser
                 "Parsing completed successfully in {DurationMs} ms",
                 duration.TotalMilliseconds);
         }
+        catch (OperationCanceledException) when (
+            cancellationToken.IsCancellationRequested)
+        {
+            _state.LastStatus = "Отменено";
+
+            _logger.LogInformation(
+                "Parsing canceled");
+        }
         catch (Exception ex)
         {
             _state.LastStatus = ex.Message;
@@ -204,13 +235,14 @@ public class FitnessParser
         finally
         {
             _state.IsRunning = false;
+            _parseLock.Release();
 
             _logger.LogInformation(
                 "Parser lock released");
         }
     }
 
-    private HashSet<string> LoadSentMessages()
+    private Dictionary<string, SentNewsEntry> LoadSentMessages()
     {
         try
         {
@@ -219,7 +251,7 @@ public class FitnessParser
                 _logger.LogInformation(
                     "Storage file not found. Creating empty state");
 
-                return new HashSet<string>();
+                return [];
             }
 
             var json = File.ReadAllText(_storagePath);
@@ -232,16 +264,30 @@ public class FitnessParser
                 _logger.LogWarning(
                     "Storage file is empty or invalid");
 
-                return new HashSet<string>();
+                return [];
             }
 
             _logger.LogInformation(
                 "Loaded {Count} entries from storage",
                 entries.Count);
 
-            return entries
-                .Select(x => x.Message)
-                .ToHashSet();
+            var sentMessages =
+                new Dictionary<string, SentNewsEntry>(
+                    StringComparer.Ordinal);
+
+            foreach (var entry in entries.Where(x =>
+                         !string.IsNullOrWhiteSpace(x.Message)))
+            {
+                if (!sentMessages.TryGetValue(
+                        entry.Message,
+                        out var existingEntry)
+                    || entry.SavedAt > existingEntry.SavedAt)
+                {
+                    sentMessages[entry.Message] = entry;
+                }
+            }
+
+            return sentMessages;
         }
         catch (Exception ex)
         {
@@ -249,20 +295,18 @@ public class FitnessParser
                 ex,
                 "Failed to load sent messages");
 
-            return new HashSet<string>();
+            return [];
         }
     }
 
-    private async Task SaveSentMessagesAsync(string lastMessage)
+    private async Task SaveSentMessagesAsync(
+        CancellationToken cancellationToken)
     {
         try
         {
             var entries = _sentMessages
-                .Select(x => new SentNewsEntry
-                {
-                    Message = x,
-                    SavedAt = DateTime.Now
-                })
+                .Values
+                .OrderByDescending(x => x.SavedAt)
                 .ToList();
 
             var json = JsonSerializer.Serialize(
@@ -274,16 +318,18 @@ public class FitnessParser
 
             await File.WriteAllTextAsync(
                 _storagePath,
-                json);
+                json,
+                cancellationToken);
 
             _logger.LogInformation(
                 "Saved {Count} messages to {Path}",
                 entries.Count,
                 _storagePath);
-
-            _logger.LogDebug(
-                "Last saved message: {Message}",
-                lastMessage);
+        }
+        catch (OperationCanceledException) when (
+            cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -292,15 +338,19 @@ public class FitnessParser
                 "Failed to save sent messages");
         }
     }
-    
-    public async Task SendManualMessageAsync(string message)
+
+    public async Task SendManualMessageAsync(
+        string message,
+        CancellationToken cancellationToken = default)
     {
         try
         {
             _logger.LogInformation(
                 "Manual resend started");
 
-            await _vkService.SendMessageAsync(message);
+            await _vkService.SendMessageAsync(
+                message,
+                cancellationToken);
 
             _logger.LogInformation(
                 "Manual resend completed");
@@ -313,10 +363,13 @@ public class FitnessParser
         }
     }
 
-    private class SentNewsEntry
+    private static IReadOnlyList<string> NormalizeKeywords(
+        IEnumerable<string> keywords)
     {
-        public string Message { get; set; } = string.Empty;
-
-        public DateTime SavedAt { get; set; }
+        return keywords
+            .Select(keyword => keyword.Trim())
+            .Where(keyword => !string.IsNullOrWhiteSpace(keyword))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
     }
 }

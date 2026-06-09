@@ -13,3 +13,4 @@ packages/
 appsettings.*.json
 wwwroot/lib/
 /FitnessHouseNewsBot/Storage/
+/FitnessHouseNewsBot/storage/

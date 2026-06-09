@@ -4,6 +4,8 @@ namespace FitnessHouseNewsBot.Options;
 
 public class VkOptions
 {
+    public const string SectionName = "Vk";
+
     [Required]
     public string Token { get; set; } = string.Empty;
 

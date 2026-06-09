@@ -1,0 +1,15 @@
+.git/
+.idea/
+.vs/
+
+**/bin/
+**/obj/
+**/out/
+
+FitnessHouseNewsBot/storage/
+FitnessHouseNewsBot/Storage/
+
+FitnessHouseNewsBot/appsettings.Development.json
+*.user
+*.suo
+*.DotSettings.user
