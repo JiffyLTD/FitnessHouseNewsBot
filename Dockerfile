@@ -1,12 +1,9 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
-COPY FitnessHouseNewsBot.sln ./
-COPY FitnessHouseNewsBot/FitnessHouseNewsBot.csproj ./FitnessHouseNewsBot/
+COPY . .
 
 RUN dotnet restore ./FitnessHouseNewsBot.sln
-
-COPY . .
 
 RUN dotnet publish ./FitnessHouseNewsBot/FitnessHouseNewsBot.csproj \
     --configuration Release \
